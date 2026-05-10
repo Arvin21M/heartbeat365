@@ -60,3 +60,23 @@ export const ConfigSchema = z.object({
 });
 
 export type Config = z.infer<typeof ConfigSchema>;
+
+// Schema for the optional `instances.yml` file at the project root, used to
+// register self-hosted Forgejo/Gitea instances. Each top-level key is the
+// host label that will appear as a prefix in repos.*.yml entries (e.g.
+// `mygitea:owner/repo`).
+//
+// `tokenEnv` should name a dedicated environment variable holding an API
+// token for that instance. If unset, requests are made unauthenticated.
+export const InstanceSchema = z.object({
+  baseUrl: z.string().url(),
+  tokenEnv: z.string().optional(),
+});
+
+export const InstancesSchema = z.record(
+  z.string().regex(/^[a-z0-9]+$/, 'host label must be lowercase alphanumeric'),
+  InstanceSchema,
+);
+
+export type Instance = z.infer<typeof InstanceSchema>;
+export type Instances = z.infer<typeof InstancesSchema>;
