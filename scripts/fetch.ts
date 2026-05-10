@@ -5,10 +5,24 @@ import yaml from 'js-yaml';
 
 import { ConfigSchema, DatasetSchema, type Dataset, type Event } from '../src/types';
 import { fetchGitHubRepo, getGitHubToken, makeGitHubClient } from './providers/github';
+import {
+  CODEBERG_BASE_URL,
+  CODEBERG_HOST,
+  fetchForgejoRepo,
+  getCodebergToken,
+  makeForgejoClient,
+} from './providers/forgejo';
+
+type RepoEntry = {
+  raw: string; // original yaml string, e.g. "codeberg:forgejo/forgejo"
+  host: string; // "github" | "codeberg"
+  ownerName: string; // "forgejo/forgejo"
+  displayName: string; // "forgejo/forgejo" (no host prefix; used in dataset.repos and UI)
+};
 
 type LoadedConfig = {
-  repos: string[];
-  funds: Record<string, string[]>;
+  entries: RepoEntry[];
+  funds: Record<string, string[]>; // values are displayNames
 };
 
 function intFromEnv(name: string, fallback: number): number {
@@ -32,14 +46,24 @@ function fundFromFilename(file: string): string {
   return m ? m[1].toLowerCase() : 'general';
 }
 
+function parseRepoEntry(raw: string): RepoEntry {
+  const idx = raw.indexOf(':');
+  if (idx === -1) {
+    return { raw, host: 'github', ownerName: raw, displayName: raw };
+  }
+  const host = raw.slice(0, idx).toLowerCase();
+  const ownerName = raw.slice(idx + 1);
+  return { raw, host, ownerName, displayName: ownerName };
+}
+
 async function loadConfig(): Promise<LoadedConfig> {
   const files = (await readdir(ROOT)).filter((f) => CONFIG_FILE_PATTERN.test(f)).sort();
   if (files.length === 0) {
     throw new Error('No repos.yml or repos.<group>.yml files found at the project root.');
   }
 
-  const all = new Set<string>();
-  const funds: Record<string, Set<string>> = {};
+  const seen = new Map<string, RepoEntry>(); // key: raw
+  const funds: Record<string, Set<string>> = {}; // values: displayName
 
   for (const file of files) {
     const raw = await readFile(resolve(ROOT, file), 'utf8');
@@ -48,13 +72,17 @@ async function loadConfig(): Promise<LoadedConfig> {
     console.log(`  ${file}: ${parsed.repos.length} repos -> "${fundName}"`);
     const bucket = (funds[fundName] ??= new Set<string>());
     for (const r of parsed.repos) {
-      all.add(r);
-      bucket.add(r);
+      if (!seen.has(r)) seen.set(r, parseRepoEntry(r));
+      bucket.add(seen.get(r)!.displayName);
     }
   }
 
+  const entries = [...seen.values()].sort((a, b) =>
+    a.displayName.toLowerCase().localeCompare(b.displayName.toLowerCase()),
+  );
+
   return {
-    repos: [...all].sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase())),
+    entries,
     funds: Object.fromEntries(
       Object.entries(funds).map(([k, v]) => [
         k,
@@ -66,25 +94,47 @@ async function loadConfig(): Promise<LoadedConfig> {
 
 async function main() {
   const config = await loadConfig();
-  const token = getGitHubToken();
-  const client = makeGitHubClient(token);
+
+  // Lazily build clients only for hosts that appear in config.
+  const usesGitHub = config.entries.some((e) => e.host === 'github');
+  const usesCodeberg = config.entries.some((e) => e.host === CODEBERG_HOST);
+
+  const githubClient = usesGitHub ? makeGitHubClient(getGitHubToken()) : null;
+  const codebergClient = usesCodeberg
+    ? makeForgejoClient({
+        baseUrl: CODEBERG_BASE_URL,
+        host: CODEBERG_HOST,
+        token: getCodebergToken(),
+      })
+    : null;
 
   const cutoffMs = Date.now() - WINDOW_DAYS * 24 * 60 * 60 * 1000;
-  console.log(`Fetching ${config.repos.length} repo(s), window=${WINDOW_DAYS}d`);
+  console.log(`Fetching ${config.entries.length} repo(s), window=${WINDOW_DAYS}d`);
 
   const all: Event[] = [];
-  for (const repo of config.repos) {
+  for (const entry of config.entries) {
     try {
-      const result = await fetchGitHubRepo(client, repo, cutoffMs);
-      if (!result.ok) {
-        console.warn(`! ${repo}: ${result.reason ?? 'fetch failed'}, skipping`);
+      let result: { events: Event[]; ok: boolean; reason?: string };
+
+      if (entry.host === 'github') {
+        result = await fetchGitHubRepo(githubClient!, entry.ownerName, cutoffMs);
+      } else if (entry.host === CODEBERG_HOST) {
+        result = await fetchForgejoRepo(codebergClient!, entry.ownerName, cutoffMs);
+      } else {
+        console.warn(`! ${entry.raw}: unknown host "${entry.host}", skipping`);
         continue;
       }
+
+      if (!result.ok) {
+        console.warn(`! ${entry.raw}: ${result.reason ?? 'fetch failed'}, skipping`);
+        continue;
+      }
+
       const recent = result.events.filter((e) => Date.parse(e.timestamp) >= cutoffMs);
-      console.log(`  ${repo}: ${recent.length} events (of ${result.events.length} fetched)`);
+      console.log(`  ${entry.raw}: ${recent.length} events (of ${result.events.length} fetched)`);
       all.push(...recent);
     } catch (err) {
-      console.error(`! ${repo}: ${(err as Error).message}`);
+      console.error(`! ${entry.raw}: ${(err as Error).message}`);
     }
   }
 
@@ -93,7 +143,7 @@ async function main() {
   const dataset: Dataset = {
     generatedAt: new Date().toISOString(),
     windowDays: WINDOW_DAYS,
-    repos: config.repos,
+    repos: config.entries.map((e) => e.displayName),
     funds: config.funds,
     events: all,
   };
