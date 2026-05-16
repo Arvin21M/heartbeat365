@@ -28,12 +28,14 @@ import {
   makeGitLabClient,
   type GitLabClient,
 } from './providers/gitlab';
+import { GIT_HOST, fetchGitRepo, normalizeGitEntry } from './providers/git';
 
 type RepoEntry = {
-  raw: string; // original yaml string, e.g. "codeberg:forgejo/forgejo"
-  host: string; // "github" | "codeberg" | "gitlab" | any registered self-hosted label
-  ownerName: string; // "forgejo/forgejo" or "gitlab-org/cli" or "group/sub/proj"
+  raw: string; // original yaml string (post-normalization for git: entries)
+  host: string; // "github" | "codeberg" | "gitlab" | "git" | any registered self-hosted label
+  ownerName: string; // "forgejo/forgejo" or "gitlab-org/cli" or normalized URL for git: entries
   displayName: string; // no host prefix; used in dataset.repos and UI
+  cloneUrl?: string; // git: entries only; the URL passed to `git clone` (may include .git)
 };
 
 type LoadedConfig = {
@@ -63,7 +65,24 @@ function fundFromFilename(file: string): string {
   return m ? m[1].toLowerCase() : 'general';
 }
 
-function parseRepoEntry(raw: string): RepoEntry {
+// Parses a single repo entry from YAML into a structured RepoEntry. For
+// "git:" entries the URL is normalized (lowercase host, strip trailing
+// slash, strip .git) so equivalent spellings collapse to one entry. For
+// non-git entries the raw string is preserved as-is.
+function parseRepoEntry(raw: string): RepoEntry | null {
+  // git: entries get URL normalization
+  if (raw.startsWith('git:')) {
+    const norm = normalizeGitEntry(raw);
+    if (!norm) return null; // malformed; ConfigSchema regex should have caught it
+    return {
+      raw: `git:${norm.url}`, // normalized form used as the dedup key
+      host: GIT_HOST,
+      ownerName: norm.url, // canonical URL (no .git), used for repoKey + event URLs
+      displayName: norm.display, // "example.com/foo/bar"
+      cloneUrl: norm.cloneUrl, // URL to pass to `git clone` (may include .git)
+    };
+  }
+
   const idx = raw.indexOf(':');
   if (idx === -1) {
     return { raw, host: 'github', ownerName: raw, displayName: raw };
@@ -79,7 +98,7 @@ async function loadConfig(): Promise<LoadedConfig> {
     throw new Error('No repos.yml or repos.<group>.yml files found at the project root.');
   }
 
-  const seen = new Map<string, RepoEntry>(); // key: raw
+  const seen = new Map<string, RepoEntry>(); // key: post-normalization raw
   const funds: Record<string, Set<string>> = {}; // values: displayName
 
   for (const file of files) {
@@ -89,8 +108,13 @@ async function loadConfig(): Promise<LoadedConfig> {
     console.log(`  ${file}: ${parsed.repos.length} repos -> "${fundName}"`);
     const bucket = (funds[fundName] ??= new Set<string>());
     for (const r of parsed.repos) {
-      if (!seen.has(r)) seen.set(r, parseRepoEntry(r));
-      bucket.add(seen.get(r)!.displayName);
+      const entry = parseRepoEntry(r);
+      if (!entry) {
+        console.warn(`! ${file}: could not parse entry "${r}", skipping`);
+        continue;
+      }
+      if (!seen.has(entry.raw)) seen.set(entry.raw, entry);
+      bucket.add(seen.get(entry.raw)!.displayName);
     }
   }
 
@@ -149,7 +173,7 @@ function buildForgejoClients(
   }
 
   // User-defined instances. Reserved labels (built-ins) cannot be redefined.
-  const reserved = new Set<string>([CODEBERG_HOST, GITLAB_HOST, 'github']);
+  const reserved = new Set<string>([CODEBERG_HOST, GITLAB_HOST, GIT_HOST, 'github']);
   for (const [label, inst] of Object.entries(instances)) {
     if (reserved.has(label)) {
       console.warn(
@@ -203,6 +227,13 @@ async function main() {
         result = await fetchGitHubRepo(githubClient!, entry.ownerName, cutoffMs);
       } else if (entry.host === GITLAB_HOST) {
         result = await fetchGitLabRepo(gitlabClient!, entry.ownerName, cutoffMs);
+      } else if (entry.host === GIT_HOST) {
+        result = await fetchGitRepo(
+          entry.ownerName,
+          entry.cloneUrl ?? entry.ownerName,
+          entry.displayName,
+          cutoffMs,
+        );
       } else {
         const client = forgejoClients.get(entry.host);
         if (!client) {
