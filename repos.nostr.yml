@@ -4,6 +4,11 @@ repos:
   - atrifat/nostr-filter-relay
   - AustinKelsay/nip55-ios-test
   - barrydeen/algo-relay
+  - barrydeen/haven
+  - barrydeen/moar
+  - barrydeen/nostrarchives-api
+  - barrydeen/wisp
+  - barrydeen/wot-relay
   - believethehype/nostrdvm
   - Bigbrotr/nostr-tools
   - Bigbrotr/relay-shadow-dvm
