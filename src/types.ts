@@ -54,15 +54,18 @@ export type Dataset = z.infer<typeof DatasetSchema>;
 //   "host:owner/name"                     -> Forgejo/Codeberg/Gitea (exactly 2 segments)
 //   "gitlab:group/project"                -> GitLab simple project
 //   "gitlab:group/subgroup/.../project"   -> GitLab nested namespace (2+ segments)
+//   "git:https://host/path/to/repo"       -> Plain Git URL (https only, commits-only)
+//   "git:https://host/path/to/repo.git"   -> Plain Git URL with .git suffix (normalized away)
 // "github:" as an explicit prefix is rejected; GitHub entries must use the
 // bare "owner/name" form. Only "gitlab:" entries may have more than two
-// slash-separated segments after the prefix.
+// slash-separated segments after the prefix. Plain-Git entries must start
+// with "git:https://" and contain at least one path segment after the host.
 export const ConfigSchema = z.object({
   fund: z.string().optional(),
   repos: z.array(
     z.string().regex(
-      /^(?:[^/\s:]+\/[^/\s:]+|gitlab:[^/\s:]+(?:\/[^/\s:]+)+|(?!(?:github|gitlab):)[a-z0-9]+:[^/\s:]+\/[^/\s:]+)$/,
-      'expected "owner/name", "gitlab:group/project", "gitlab:group/subgroup/project", or "host:owner/name"',
+      /^(?:[^/\s:]+\/[^/\s:]+|gitlab:[^/\s:]+(?:\/[^/\s:]+)+|git:https:\/\/[^/\s:?#@]+(?:\/[^/\s?#]+)+(?:\.git)?\/?|(?!(?:github|gitlab|git):)[a-z0-9]+:[^/\s:]+\/[^/\s:]+)$/,
+      'expected "owner/name", "gitlab:group/project", "gitlab:group/subgroup/project", "host:owner/name", or "git:https://host/path/to/repo"',
     ),
   ),
 });
