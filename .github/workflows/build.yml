@@ -107,16 +107,19 @@ jobs:
       - name: Publish events.json to data branch
         if: needs.decide.outputs.should_fetch == 'true'
         run: |
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          # Work in a separate directory to avoid clobbering the build tree
           mkdir -p /tmp/data-branch
           cp public/data/events.json /tmp/data-branch/events.json
           cd /tmp/data-branch
           git init -q
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git remote add origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
-          git fetch origin data --depth=1 || true
-          git checkout -B data
+          git fetch origin data --depth=1 2>/dev/null || true
+          if git rev-parse --verify origin/data >/dev/null 2>&1; then
+            git checkout -B data origin/data
+          else
+            git checkout -B data
+          fi
           mkdir -p public/data
           mv events.json public/data/events.json
           git add public/data/events.json
